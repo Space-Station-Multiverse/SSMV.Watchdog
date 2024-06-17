@@ -12,16 +12,19 @@ using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using SS14.Watchdog.Configuration.Updates;
 using SS14.Watchdog.Utility;
+using System.Net.Http.Headers;
 
 namespace SS14.Watchdog.Components.Updates
 {
     public sealed class UpdateProviderManifest : UpdateProvider
     {
         private const int DownloadTimeoutSeconds = 120;
-        
+
         private readonly HttpClient _httpClient = new();
 
         private readonly string _manifestUrl;
+        private readonly string? _serverDownloadUsername;
+        private readonly string? _serverDownloadPassword;
         private readonly ILogger<UpdateProviderManifest> _logger;
 
         public UpdateProviderManifest(
@@ -30,6 +33,8 @@ namespace SS14.Watchdog.Components.Updates
         {
             _logger = logger;
             _manifestUrl = configuration.ManifestUrl;
+            _serverDownloadUsername = configuration.ServerDownloadUsername;
+            _serverDownloadPassword = configuration.ServerDownloadPassword;
         }
 
         public override async Task<bool> CheckForUpdateAsync(
@@ -39,6 +44,7 @@ namespace SS14.Watchdog.Components.Updates
             ManifestInfo? manifest;
             try
             {
+                _httpClient.DefaultRequestHeaders.Authorization = null; // Assume no authorization required for manifest
                 manifest = await _httpClient.GetFromJsonAsync<ManifestInfo>(_manifestUrl, cancel);
             }
             catch (Exception e)
@@ -64,6 +70,7 @@ namespace SS14.Watchdog.Components.Updates
             ManifestInfo? manifest;
             try
             {
+                _httpClient.DefaultRequestHeaders.Authorization = null; // Assume no authorization required for manifest
                 manifest = await _httpClient.GetFromJsonAsync<ManifestInfo>(_manifestUrl, cancel);
             }
             catch (Exception e)
@@ -84,7 +91,7 @@ namespace SS14.Watchdog.Components.Updates
                 _logger.LogWarning("There are no versions, not updating");
                 return null;
             }
-            
+
             if (maxVersion == currentVersion)
             {
                 _logger.LogDebug("Update not necessary!");
@@ -92,7 +99,7 @@ namespace SS14.Watchdog.Components.Updates
             }
 
             var versionInfo = manifest.Builds[maxVersion];
-            
+
             _logger.LogTrace("New version is {NewVersion} from {OldVersion}", maxVersion, currentVersion ?? "<none>");
 
             var rid = RidUtility.FindBestRid(versionInfo.Server.Keys);
@@ -106,7 +113,7 @@ namespace SS14.Watchdog.Components.Updates
             var build = versionInfo.Server[rid];
             var downloadUrl = build.Url;
             var downloadHash = Convert.FromHexString(build.Sha256);
-            
+
             // Create temporary file to download binary into (not doing this in memory).
             await using var tempFile = TempFile.CreateTempFile();
 
@@ -116,6 +123,7 @@ namespace SS14.Watchdog.Components.Updates
             var timeout = Task.Delay(TimeSpan.FromSeconds(DownloadTimeoutSeconds), cancel);
             var downloadTask = Task.Run(async () =>
             {
+                _httpClient.DefaultRequestHeaders.Authorization = GetAuthorizationHeader(); // Authenticate download, if necessary
                 var resp = await _httpClient.GetAsync(downloadUrl, cancel);
                 await resp.Content.CopyToAsync(tempFile, cancel);
             }, cancel);
@@ -139,7 +147,7 @@ namespace SS14.Watchdog.Components.Updates
                 _logger.LogError("Hash verification failed while updating!");
                 return null;
             }
-            
+
             _logger.LogTrace("Deleting old bin directory ({BinPath})", binPath);
             if (Directory.Exists(binPath))
             {
@@ -149,7 +157,7 @@ namespace SS14.Watchdog.Components.Updates
             Directory.CreateDirectory(binPath);
 
             _logger.LogTrace("Extracting zip file");
-            
+
             tempFile.Seek(0, SeekOrigin.Begin);
             DoBuildExtract(tempFile, binPath);
 
@@ -201,6 +209,16 @@ namespace SS14.Watchdog.Components.Updates
                 Url = url;
                 Sha256 = sha256;
             }
+        }
+
+        private AuthenticationHeaderValue? GetAuthorizationHeader()
+        {
+            if (string.IsNullOrEmpty(_serverDownloadUsername) || string.IsNullOrEmpty(_serverDownloadPassword))
+                return null;
+
+            string credentialsPlaintext = _serverDownloadUsername + ":" + _serverDownloadPassword;
+            string base64Credentials = System.Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes(credentialsPlaintext));
+            return new AuthenticationHeaderValue("Basic", base64Credentials);
         }
     }
 }
